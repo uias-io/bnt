@@ -1,151 +1,117 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/hiuias/bnt"
 	"time"
+
+	"github.com/hiuias/bnt"
 )
 
-// 生成测试用的密钥对
-func generateTestKeys() (aesKey, hmacKey []byte) {
-	aesKey = make([]byte, bnt.AESKeyLen)
-	if _, err := rand.Read(aesKey); err != nil {
-		fmt.Println(err)
-	}
-
-	hmacKey = make([]byte, 32) // 使用32字节的HMAC密钥
-	if _, err := rand.Read(hmacKey); err != nil {
-		fmt.Printf("生成HMAC密钥失败: %v", err)
-	}
-
-	return aesKey, hmacKey
-}
-
-// 示例：从环境变量获取密钥
-func GetKeysFromEnv() (aesKey, hmacKey []byte, err error) {
-	// 生成 AES 密钥 (32 字节)
-	// 生成 32 字节的随机数据并 Base64 编码
-	// openssl rand -base64 32
-	aesKeyStr := "nZ/ShAOj/VFPz+pJ7dxNy9Y6TuWOp/d412sHuLHfSw8="
-	// 生成 HMAC 密钥 (至少 16 字节，推荐 32 字节)
-	// 生成 32 字节的随机数据并 Base64 编码
-	// openssl rand -base64 32
-	hmacKeyStr := "mJT6l4KpRmATxVtXsDTk8fZ8iORGx3Lm8v0fFyPUme8="
-
-	if aesKeyStr == "" || hmacKeyStr == "" {
-		return nil, nil, errors.New("encryption keys not set in environment")
-	}
-
-	// Base64解码密钥（假设密钥以Base64格式存储）
-	aesKey, err = base64.StdEncoding.DecodeString(aesKeyStr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid AES key: %w", err)
-	}
-
-	hmacKey, err = base64.StdEncoding.DecodeString(hmacKeyStr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid HMAC key: %w", err)
-	}
-
-	return aesKey, hmacKey, nil
-}
-
-type UserInfo struct {
-	User struct {
-		Domain struct {
-			Id   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"domain"`
-		ID   string `json:"id"`
-		Name struct {
-			Account string `json:"account"`
-		} `json:"name"`
-	} `json:"user"`
-}
-
-// 示例：自定义Claims
-type UserClaims struct {
-	UserInfo *UserInfo `json:"user_info"`
+// BizClaims 自定义声明，嵌入标准RegisteredClaims，增加自己业务字段
+type BizClaims struct {
 	bnt.RegisteredClaims
+
+	// 额外业务信息
+	Role    string `json:"role"`     // 用户角色
+	OrgID   string `json:"org_id"`   // 所属组织ID
+	IsAdmin bool   `json:"is_admin"` // 是否管理员
 }
 
-// 创建测试用的claims
-func createClaims() *UserClaims {
-	now := time.Now().UTC()
-	expiresAt := now.Add(3 * time.Hour)
-	s := &UserInfo{}
-	s.User.Domain.Id = "5dbc59fd33e94b70a60d9b55633f53d2"
-	s.User.Domain.Name = "sys_svc_snms"
-	s.User.ID = "5dbc59fd33e94b70a60d9b55633f53d2"
-	s.User.Name.Account = "sys_svc_snms"
-	return &UserClaims{
-		UserInfo: s,
-		RegisteredClaims: bnt.RegisteredClaims{
-			Issuer:    "test_issuer",
-			Subject:   "test_subject",
-			Audience:  []string{"sys_svc_snms", "sys_svc_snms"},
-			ExpiresAt: &expiresAt, // 过期时间
-			NotBefore: &now,       // 生效时间
-			IssuedAt:  &now,       // 签发时间
-			ID:        "jti/d0fdd71e67f24c938f956f4b4522c208",
-		},
+// Valid 实现 bnt.Claims 接口
+func (c *BizClaims) Valid() error {
+	// 执行原有标准校验（过期、签发者、续签次数等）
+	if err := c.RegisteredClaims.Valid(); err != nil {
+		return err
 	}
+	// 自定义业务校验规则
+	if c.OrgID == "" {
+		return errors.New("org_id 不能为空")
+	}
+	return nil
 }
 
 func main() {
-	// aesKey, hmacKey := generateTestKeys()
-	aesKey, hmacKey, err := GetKeysFromEnv()
+	// ========== 密钥准备 ==========
+	// AES-256 固定32字节；HMAC密钥≥16字节，生产环境必须密码学随机生成！
+	aesKey := []byte("01234567890123456789012345678901") // 32字节
+	hmacKey := []byte("abcdefgh12345678abcdefgh12345678")
+
+	// 创建签名实例
+	kid := uint32(time.Now().Unix())
+	signMethod, err := bnt.NewSigningMethodBinaryWithKID(aesKey, hmacKey, kid)
 	if err != nil {
-		fmt.Printf("创建key方法失败: %v", err)
-		return
+		panic(err)
 	}
-	signingMethod, err := bnt.NewSigningMethodBinary(aesKey, hmacKey)
+
+	// 构造【自定义Claims】，带上额外业务字段
+	now := time.Now().UTC()
+	claims := &BizClaims{
+		RegisteredClaims: bnt.RegisteredClaims{
+			ID:            "jti-xxxx001",
+			IssuedAt:      &now,
+			ExpiresAt:     func() *time.Time { t := now.Add(1 * time.Hour); return &t }(),
+			Ttl:           3600, // 有效时长秒
+			MaxIssueCount: 2,    // 最多允许续签2次
+		},
+		// 填充额外信息
+		Role:    "色角",
+		OrgID:   "org-0005",
+		IsAdmin: false,
+	}
+
+	// 创建内存token对象
+	tokenObj := bnt.NewToken(claims, signMethod)
+
+	fmt.Println("||||||||||||||")
+	fmt.Println(tokenObj.Claims)
+	// 签名加密，得到对外下发token字符串
+	tokenStr, err := tokenObj.SignedString()
 	if err != nil {
-		fmt.Printf("创建签名方法失败: %v", err)
+		panic(fmt.Sprintf("签发失败:%v", err))
 	}
-	fmt.Println(aesKey)
-	fmt.Println(hmacKey)
-	fmt.Println("signingMethod", signingMethod)
 
-	// 创建claims和token
-	claims := createClaims()
-	token := bnt.NewToken(claims, signingMethod)
-	fmt.Println("claims", claims)
+	fmt.Println("生成Token字符串：")
+	fmt.Println(tokenStr)
+	fmt.Println()
 
-	// 生成token字符串
-	tokenStr, err := token.SignedString()
+	// -------------------- 模拟服务端验证token --------------------
+	fmt.Println("===== 开始验证Token =====")
+	parseClaims := &BizClaims{} // 使用自定义结构体接收解析结果
+	parsedToken, err := bnt.Parse(tokenStr, parseClaims, signMethod)
 	if err != nil {
-		fmt.Printf("生成token失败: %v", err)
+		panic(fmt.Sprintf("验证失败：%v", err))
 	}
-	if tokenStr == "" {
-		fmt.Printf("生成的token为空字符串")
-	}
-	fmt.Println("==>", tokenStr)
+	fmt.Println()
+	fmt.Println("验证成功！")
+	fmt.Println(parsedToken.Claims)
 
-	// 解析并验证token
-	parsedClaims := &UserClaims{}
-	parsedToken, err := bnt.Parse(tokenStr, parsedClaims, signingMethod)
+	// -------------------- Token续签演示 --------------------
+	fmt.Println("===== 执行Token续签 =====")
+	err = parsedToken.Refresh("zzzzzzzzzzzzzzzzzzzzzzz")
 	if err != nil {
-		fmt.Printf("解析token失败: %v\n", err)
-		return
+		panic(fmt.Sprintf("续签失败：%v", err))
 	}
 
-	fmt.Printf("---+++++++===> %+v\n", parsedClaims)
-
-	// 验证token有效性
-	if err := parsedToken.Claims.Valid(); err != nil {
-		fmt.Printf("验证token有效性失败: %v\n", err)
-	}
-
-	jsonData, err := json.Marshal(parsedClaims)
+	fmt.Println()
+	fmt.Println("||||||||||||||")
+	fmt.Println(parsedToken.Claims)
+	// Refresh只修改内存，需要重新SignedString拿到新token
+	newTokenStr, err := parsedToken.SignedString()
 	if err != nil {
-		fmt.Println(err)
-		return
+		panic(err)
+	}
+	fmt.Println("续签后新Token：")
+	fmt.Println(newTokenStr)
+	// 解析续签后的token，自定义字段依然保留
+	fmt.Println("\n===== 校验续签后的Token =====")
+	renewClaims := &BizClaims{}
+	aa, err := bnt.Parse(newTokenStr, renewClaims, signMethod)
+	if err != nil {
+		panic(err)
 	}
 
-	fmt.Println("json: ", string(jsonData))
+	fmt.Println()
+	fmt.Printf("续签后 角色:%s  组织:%s  续签次数:%d\n", renewClaims.Role, renewClaims.OrgID, renewClaims.IssueCount)
+	fmt.Println(aa.Claims)
 }

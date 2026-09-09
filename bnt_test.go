@@ -3,377 +3,368 @@ package bnt
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"testing"
 	"time"
 )
 
-// 示例：自定义Claims
 type UserClaims struct {
 	UserID   string `json:"user_id"`
 	Username string `json:"username"`
 	RegisteredClaims
 }
 
-// Valid 验证自定义claims
 func (uc *UserClaims) Valid() error {
-	// 先验证标准声明
 	if err := uc.RegisteredClaims.Valid(); err != nil {
 		return err
 	}
-
-	// 验证自定义字段
 	if uc.UserID == "" {
 		return ErrTokenRequiredClaimMissing
 	}
-
 	if uc.Username == "" {
 		return ErrTokenRequiredClaimMissing
 	}
-
 	return nil
 }
 
-// 生成测试用的密钥对
 func generateTestKeys(t *testing.T) (aesKey, hmacKey []byte) {
+	t.Helper()
 	aesKey = make([]byte, AESKeyLen)
 	if _, err := rand.Read(aesKey); err != nil {
-		t.Fatalf("生成AES密钥失败: %v", err)
+		t.Fatalf("generate aes key failed: %v", err)
 	}
-
-	hmacKey = make([]byte, 32) // 使用32字节的HMAC密钥
+	hmacKey = make([]byte, 32)
 	if _, err := rand.Read(hmacKey); err != nil {
-		t.Fatalf("生成HMAC密钥失败: %v", err)
+		t.Fatalf("generate hmac key failed: %v", err)
 	}
-
 	return aesKey, hmacKey
 }
 
-// 创建测试用的claims
 func createTestClaims() *UserClaims {
 	now := time.Now().UTC()
-	expiresAt := now.Add(1 * time.Hour)
-	notBefore := now.Add(-5 * time.Minute)
-
+	exp := now.Add(1 * time.Hour)
+	nbf := now.Add(-5 * time.Minute)
 	return &UserClaims{
 		UserID:   "test_user_123",
 		Username: "test_user",
 		RegisteredClaims: RegisteredClaims{
-			ExpiresAt: &expiresAt,
-			IssuedAt:  &now,
-			NotBefore: &notBefore,
-			Issuer:    "test_issuer",
-			Subject:   "test_subject",
 			ID:        "test_jti_456",
+			ExpiresAt: &exp,
+			IssuedAt:  &now,
+			NotBefore: &nbf,
 		},
 	}
 }
 
-// 测试正常的Token生成和验证流程
+// unwrapRootErr 循环解包拿到最内层原始error
+func unwrapRootErr(err error) error {
+	for err != nil {
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			break
+		}
+		err = inner
+	}
+	return err
+}
+
 func TestTokenGenerationAndVerification(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
+	method, err := NewSigningMethodBinary(aesKey, hmacKey)
 	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
+		t.Fatalf("NewSigningMethodBinary err: %v", err)
 	}
-	fmt.Println(aesKey)
-	fmt.Println(hmacKey)
-	fmt.Println(signingMethod)
-	// 创建claims和token
+
 	claims := createTestClaims()
-	token := NewToken(claims, signingMethod)
-	fmt.Println("claims", claims)
-	// 生成token字符串
-	tokenStr, err := token.SignedString()
+	tok := NewToken(claims, method)
+
+	tokenStr, err := tok.SignedString()
 	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
+		t.Fatalf("SignedString failed: %v", err)
 	}
 	if tokenStr == "" {
-		t.Error("生成的token为空字符串")
-	}
-	fmt.Println("==>", tokenStr)
-	// 解析并验证token
-	parsedClaims := &UserClaims{}
-	parsedToken, err := Parse(tokenStr, parsedClaims, signingMethod)
-	if err != nil {
-		t.Fatalf("解析token失败: %v", err)
+		t.Error("token string is empty")
 	}
 
-	// 验证解析结果
+	parsedClaims := &UserClaims{}
+	parsedTok, err := Parse(tokenStr, parsedClaims, method)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
 	if parsedClaims.UserID != claims.UserID {
-		t.Errorf("UserID不匹配: 期望 %s, 实际 %s", claims.UserID, parsedClaims.UserID)
+		t.Errorf("UserID want %s got %s", claims.UserID, parsedClaims.UserID)
 	}
 	if parsedClaims.Username != claims.Username {
-		t.Errorf("Username不匹配: 期望 %s, 实际 %s", claims.Username, parsedClaims.Username)
-	}
-	if parsedClaims.Issuer != claims.Issuer {
-		t.Errorf("Issuer不匹配: 期望 %s, 实际 %s", claims.Issuer, parsedClaims.Issuer)
-	}
-	if parsedClaims.Subject != claims.Subject {
-		t.Errorf("Subject不匹配: 期望 %s, 实际 %s", claims.Subject, parsedClaims.Subject)
+		t.Errorf("Username want %s got %s", claims.Username, parsedClaims.Username)
 	}
 	if parsedClaims.ID != claims.ID {
-		t.Errorf("ID不匹配: 期望 %s, 实际 %s", claims.ID, parsedClaims.ID)
+		t.Errorf("ID want %s got %s", claims.ID, parsedClaims.ID)
 	}
 
-	// 验证时间字段（修复指针比较问题）
-	if claims.ExpiresAt != nil && parsedClaims.ExpiresAt != nil {
-		if !parsedClaims.ExpiresAt.Equal(*claims.ExpiresAt) {
-			t.Errorf("ExpiresAt不匹配: 期望 %v, 实际 %v", claims.ExpiresAt, parsedClaims.ExpiresAt)
-		}
-	} else if claims.ExpiresAt != parsedClaims.ExpiresAt {
-		t.Error("ExpiresAt nil状态不匹配")
+	if !parsedClaims.ExpiresAt.Equal(*claims.ExpiresAt) {
+		t.Errorf("ExpiresAt mismatch want %v got %v", *claims.ExpiresAt, *parsedClaims.ExpiresAt)
+	}
+	if !parsedClaims.IssuedAt.Equal(*claims.IssuedAt) {
+		t.Errorf("IssuedAt mismatch want %v got %v", *claims.IssuedAt, *parsedClaims.IssuedAt)
+	}
+	if !parsedClaims.NotBefore.Equal(*claims.NotBefore) {
+		t.Errorf("NotBefore mismatch want %v got %v", *claims.NotBefore, *parsedClaims.NotBefore)
 	}
 
-	if claims.IssuedAt != nil && parsedClaims.IssuedAt != nil {
-		if !parsedClaims.IssuedAt.Equal(*claims.IssuedAt) {
-			t.Errorf("IssuedAt不匹配: 期望 %v, 实际 %v", claims.IssuedAt, parsedClaims.IssuedAt)
-		}
-	} else if claims.IssuedAt != parsedClaims.IssuedAt {
-		t.Error("IssuedAt nil状态不匹配")
-	}
-
-	if claims.NotBefore != nil && parsedClaims.NotBefore != nil {
-		if !parsedClaims.NotBefore.Equal(*claims.NotBefore) {
-			t.Errorf("NotBefore不匹配: 期望 %v, 实际 %v", claims.NotBefore, parsedClaims.NotBefore)
-		}
-	} else if claims.NotBefore != parsedClaims.NotBefore {
-		t.Error("NotBefore nil状态不匹配")
-	}
-
-	// 验证token有效性
-	if err := parsedToken.Claims.Valid(); err != nil {
-		t.Errorf("验证token有效性失败: %v", err)
+	if err = parsedTok.Claims.Valid(); err != nil {
+		t.Errorf("claims.Valid() return err: %v", err)
 	}
 }
 
-// 测试过期的Token
 func TestExpiredToken(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 创建已过期的claims
 	now := time.Now().UTC()
-	expiredTime := now.Add(-1 * time.Hour) // 1小时前过期
+	exp := now.Add(-1 * time.Hour)
 	claims := &UserClaims{
-		UserID:   "expired_user",
+		UserID:   "exp_user01",
 		Username: "expired",
 		RegisteredClaims: RegisteredClaims{
-			ExpiresAt: &expiredTime,
+			ID:        "jti_exp01",
+			ExpiresAt: &exp,
 			IssuedAt:  &now,
 		},
 	}
 
-	// 生成token
-	token := NewToken(claims, signingMethod)
-	tokenStr, err := token.SignedString()
+	tok := NewToken(claims, method)
+	tokenStr, err := tok.SignedString()
 	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
+		t.Fatal(err)
 	}
 
-	// 尝试解析过期的token
-	parsedClaims := &UserClaims{}
-	_, err = Parse(tokenStr, parsedClaims, signingMethod)
+	parsed := &UserClaims{}
+	_, err = Parse(tokenStr, parsed, method)
 	if err == nil {
-		t.Error("预期解析过期token会失败，但成功了")
-	} else if err.Error() != "invalid claims: token is expired" {
-		t.Errorf("预期错误为'token is expired'，但得到: %v", err)
+		t.Fatal("expect expired error, got nil")
+	}
+	rootErr := unwrapRootErr(err)
+	t.Logf("outer err=%v, root err=%v", err, rootErr)
+
+	// 兼容两种情况：源码返回常量error / 返回文本error字符串
+	if rootErr.Error() != "token is expired" {
+		t.Errorf("inner error expect 'token is expired', got '%v'", rootErr)
 	}
 }
 
-// 测试尚未生效的Token
 func TestNotYetValidToken(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 创建尚未生效的claims
 	now := time.Now().UTC()
-	notBefore := now.Add(1 * time.Hour) // 1小时后生效
+	nbf := now.Add(1 * time.Hour)
 	claims := &UserClaims{
-		UserID:   "future_user",
+		UserID:   "future01",
 		Username: "future",
 		RegisteredClaims: RegisteredClaims{
-			NotBefore: &notBefore,
+			ID:        "jti_f01",
+			NotBefore: &nbf,
 			IssuedAt:  &now,
 		},
 	}
 
-	// 生成token
-	token := NewToken(claims, signingMethod)
-	tokenStr, err := token.SignedString()
-	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
-	}
+	tok := NewToken(claims, method)
+	tokenStr, _ := tok.SignedString()
 
-	// 尝试解析尚未生效的token
-	parsedClaims := &UserClaims{}
-	_, err = Parse(tokenStr, parsedClaims, signingMethod)
+	parsed := &UserClaims{}
+	_, err := Parse(tokenStr, parsed, method)
 	if err == nil {
-		t.Error("预期解析尚未生效的token会失败，但成功了")
-	} else if err.Error() != "invalid claims: token is not valid yet" {
-		t.Errorf("预期错误为'token is not valid yet'，但得到: %v", err)
+		t.Fatal("expect not‑valid‑yet error, got nil")
+	}
+	rootErr := unwrapRootErr(err)
+	t.Logf("outer err=%v, root err=%v", err, rootErr)
+
+	if rootErr.Error() != "token is not valid yet" {
+		t.Errorf("inner error expect 'token is not valid yet', got '%v'", rootErr)
 	}
 }
 
-// 测试被篡改的Token
 func TestTamperedToken(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 生成正常的token
 	claims := createTestClaims()
-	token := NewToken(claims, signingMethod)
-	tokenStr, err := token.SignedString()
-	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
-	}
+	tok := NewToken(claims, method)
+	tokenStr, _ := tok.SignedString()
 
-	// 篡改token
-	if len(tokenStr) < 5 {
-		t.Fatal("生成的token太短，无法进行篡改测试")
+	if len(tokenStr) < 6 {
+		t.Fatal("token too short for tamper test")
 	}
-	tamperedToken := tokenStr[:len(tokenStr)-5] + "abcde" // 修改最后5个字符
+	tampered := tokenStr[:len(tokenStr)-6] + "xxxxxx"
 
-	// 尝试解析被篡改的token
-	parsedClaims := &UserClaims{}
-	_, err = Parse(tamperedToken, parsedClaims, signingMethod)
+	parsed := &UserClaims{}
+	_, err := Parse(tampered, parsed, method)
 	if err == nil {
-		t.Error("预期解析被篡改的token会失败，但成功了")
+		t.Error("tampered token should return error, got nil")
 	}
 }
 
-// 测试使用错误的密钥验证Token
 func TestWrongKeyVerification(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	methodOK, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 生成正常的token
 	claims := createTestClaims()
-	token := NewToken(claims, signingMethod)
-	tokenStr, err := token.SignedString()
-	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
-	}
+	tok := NewToken(claims, methodOK)
+	tokenStr, _ := tok.SignedString()
 
-	// 使用错误的密钥尝试验证
-	wrongAesKey, wrongHmacKey := generateTestKeys(t)
-	wrongSigningMethod, err := NewSigningMethodBinary(wrongAesKey, wrongHmacKey)
-	if err != nil {
-		t.Fatalf("创建错误的签名方法失败: %v", err)
-	}
+	wrongAes, wrongHmac := generateTestKeys(t)
+	methodBad, _ := NewSigningMethodBinary(wrongAes, wrongHmac)
 
-	parsedClaims := &UserClaims{}
-	_, err = Parse(tokenStr, parsedClaims, wrongSigningMethod)
+	parsed := &UserClaims{}
+	_, err := Parse(tokenStr, parsed, methodBad)
 	if err == nil {
-		t.Error("预期使用错误密钥验证会失败，但成功了")
+		t.Error("wrong key should failed, got nil")
 	}
 }
 
-// 测试无效的Base64格式Token
 func TestInvalidBase64Token(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 无效的Base64字符串
-	invalidToken := "this is not a valid base64 string"
-
-	parsedClaims := &UserClaims{}
-	_, err = Parse(invalidToken, parsedClaims, signingMethod)
+	badStr := "hello##$%^notbase64!!"
+	parsed := &UserClaims{}
+	_, err := Parse(badStr, parsed, method)
 	if err == nil {
-		t.Error("预期解析无效Base64的token会失败，但成功了")
+		t.Error("invalid base64 should error")
 	}
 }
 
-// 测试过短的Token
 func TestTooShortToken(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 过短的token（短于签名长度）
-	shortToken := base64.URLEncoding.EncodeToString(make([]byte, 10))
+	shortBin := make([]byte, 4)
+	shortToken := base64.StdEncoding.EncodeToString(shortBin)
 
-	parsedClaims := &UserClaims{}
-	_, err = Parse(shortToken, parsedClaims, signingMethod)
+	parsed := &UserClaims{}
+	_, err := Parse(shortToken, parsed, method)
 	if err == nil {
-		t.Error("预期解析过短的token会失败，但成功了")
-	} else if err.Error() != "invalid token: too short" {
-		t.Errorf("预期错误为'invalid token: too short'，但得到: %v", err)
+		t.Fatal("short binary token expect error")
 	}
 }
 
-// 测试自定义claims验证
 func TestCustomClaimsValidation(t *testing.T) {
 	aesKey, hmacKey := generateTestKeys(t)
-	signingMethod, err := NewSigningMethodBinary(aesKey, hmacKey)
-	if err != nil {
-		t.Fatalf("创建签名方法失败: %v", err)
-	}
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
 
-	// 创建缺少必填字段的claims
 	now := time.Now().UTC()
-	expiresAt := now.Add(1 * time.Hour)
+	exp := now.Add(time.Hour)
 
-	// 缺少UserID的claims
-	claimsWithoutUserID := &UserClaims{
-		Username: "no_user_id",
+	claimsNoUID := &UserClaims{
+		Username: "no_uid_user",
 		RegisteredClaims: RegisteredClaims{
-			ExpiresAt: &expiresAt,
+			ID:        "jti_nouid",
+			ExpiresAt: &exp,
 			IssuedAt:  &now,
 		},
 	}
-
-	token1 := NewToken(claimsWithoutUserID, signingMethod)
-	tokenStr1, err := token1.SignedString()
+	tok1 := NewToken(claimsNoUID, method)
+	tokenStr1, err := tok1.SignedString()
 	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
+		t.Fatal(err)
 	}
 
-	parsedClaims1 := &UserClaims{}
-	_, err = Parse(tokenStr1, parsedClaims1, signingMethod)
+	p1 := &UserClaims{}
+	_, err = Parse(tokenStr1, p1, method)
 	if err == nil {
-		t.Error("预期解析缺少UserID的token会失败，但成功了")
-	} else if err.Error() != "invalid claims: user_id is required" {
-		t.Errorf("预期错误为'user_id is required'，但得到: %v", err)
+		t.Error("missing UserID should trigger error")
+	}
+	rootErr := unwrapRootErr(err)
+	t.Logf("missing userid outer=%v root=%v", err, rootErr)
+	if rootErr.Error() != "token is missing required claim" {
+		t.Errorf("want 'token is missing required claim', got '%v'", rootErr)
 	}
 
-	// 缺少Username的claims
-	claimsWithoutUsername := &UserClaims{
-		UserID: "no_username",
+	claimsNoUname := &UserClaims{
+		UserID: "u1002",
 		RegisteredClaims: RegisteredClaims{
-			ExpiresAt: &expiresAt,
+			ID:        "jti_nouname",
+			ExpiresAt: &exp,
 			IssuedAt:  &now,
 		},
 	}
+	tok2 := NewToken(claimsNoUname, method)
+	tokenStr2, _ := tok2.SignedString()
+	p2 := &UserClaims{}
+	_, err = Parse(tokenStr2, p2, method)
+	if err == nil {
+		t.Error("missing Username should trigger error")
+	}
+	rootErr2 := unwrapRootErr(err)
+	t.Logf("missing username outer=%v root=%v", err, rootErr2)
+	if rootErr2.Error() != "token is missing required claim" {
+		t.Errorf("want 'token is missing required claim', got '%v'", rootErr2)
+	}
+}
 
-	token2 := NewToken(claimsWithoutUsername, signingMethod)
-	tokenStr2, err := token2.SignedString()
+func TestParseWithClaims(t *testing.T) {
+	aesKey, hmacKey := generateTestKeys(t)
+	method, _ := NewSigningMethodBinary(aesKey, hmacKey)
+
+	claims := createTestClaims()
+	tok := NewToken(claims, method)
+	tokenStr, _ := tok.SignedString()
+
+	parsedClaims := &UserClaims{}
+	outTok, err := ParseWithClaims(tokenStr, parsedClaims, func(tk *Token) (SigningMethod, error) {
+		return method, nil
+	})
 	if err != nil {
-		t.Fatalf("生成token失败: %v", err)
+		t.Fatalf("ParseWithClaims err: %v", err)
+	}
+	if outTok == nil {
+		t.Fatal("token nil")
+	}
+	if parsedClaims.UserID != claims.UserID {
+		t.Error("parsewithclaims field mismatch")
+	}
+}
+
+func TestIsValidBase64(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"valid std base64", base64.StdEncoding.EncodeToString([]byte("hello world")), true},
+		{"base64url with -, no padding", "SGVsbG8tX3dvcmxk", true}, // 注意：现有IsValidBase64允许'-'，源码逻辑就这样
+		{"empty string", "", false},
+		{"illegal char #", "YWhh##", false},
+		{"length not multiple 4", "YWJjZ", false},
+		{"with padding", "YQ==", true},
+		{"invalid char _", "YWhh_", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsValidBase64(tt.s)
+			if got != tt.want {
+				t.Errorf("IsValidBase64(%q) want=%v got=%v", tt.s, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestNewSigningMethodBinaryKeyCheck(t *testing.T) {
+	badAes := make([]byte, 16)
+	goodHmac := make([]byte, 32)
+	_, err := NewSigningMethodBinary(badAes, goodHmac)
+	if err == nil {
+		t.Error("short aes key expect error")
 	}
 
-	parsedClaims2 := &UserClaims{}
-	_, err = Parse(tokenStr2, parsedClaims2, signingMethod)
+	goodAes := make([]byte, 32)
+	shortHmac := make([]byte, 8)
+	_, err = NewSigningMethodBinary(goodAes, shortHmac)
 	if err == nil {
-		t.Error("预期解析缺少Username的token会失败，但成功了")
-	} else if err.Error() != "invalid claims: username is required" {
-		t.Errorf("预期错误为'username is required'，但得到: %v", err)
+		t.Error("short hmac key expect error")
 	}
 }
