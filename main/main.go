@@ -38,8 +38,8 @@ func main() {
 	hmacKey := []byte("abcdefgh12345678abcdefgh12345678")
 
 	// 创建签名实例
-	kid := uint32(time.Now().Unix())
-	signMethod, err := bnt.NewSigningMethodBinaryWithKID(aesKey, hmacKey, kid)
+	// kid := uint32(time.Now().Unix())
+	signMethod, err := bnt.NewSigningMethodBinaryWithKID(aesKey, hmacKey, bnt.GenKid())
 	if err != nil {
 		panic(err)
 	}
@@ -50,9 +50,10 @@ func main() {
 		RegisteredClaims: bnt.RegisteredClaims{
 			ID:            "jti-xxxx001",
 			IssuedAt:      &now,
+			NotBefore:     &now,
 			ExpiresAt:     func() *time.Time { t := now.Add(1 * time.Hour); return &t }(),
 			Ttl:           3600, // 有效时长秒
-			MaxIssueCount: 2,    // 最多允许续签2次
+			MaxIssueCount: 0,    // 最多允许续签2次
 		},
 		// 填充额外信息
 		Role:    "色角",
@@ -64,7 +65,7 @@ func main() {
 	tokenObj := bnt.NewToken(claims, signMethod)
 
 	fmt.Println("||||||||||||||")
-	fmt.Println(tokenObj.Claims)
+	fmt.Println("-->", tokenObj)
 	// 签名加密，得到对外下发token字符串
 	tokenStr, err := tokenObj.SignedString()
 	if err != nil {
@@ -88,6 +89,8 @@ func main() {
 
 	// -------------------- Token续签演示 --------------------
 	fmt.Println("===== 执行Token续签 =====")
+
+	time.Sleep(5 * time.Second)
 	err = parsedToken.Refresh("zzzzzzzzzzzzzzzzzzzzzzz")
 	if err != nil {
 		panic(fmt.Sprintf("续签失败：%v", err))
@@ -114,4 +117,6 @@ func main() {
 	fmt.Println()
 	fmt.Printf("续签后 角色:%s  组织:%s  续签次数:%d\n", renewClaims.Role, renewClaims.OrgID, renewClaims.IssueCount)
 	fmt.Println(aa.Claims)
+
+	fmt.Println()
 }

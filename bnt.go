@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// [4字节Kid][4字节随机数][1字节版本][3字节保留][1字节标志][2字节原始Token长度][原始Token][12B nonce]
+// [4字节Kid][4字节随机数][1字节版本][4字节保留][1字节标志][2字节原始Token长度][原始Token][12B nonce]
 
 // 常量定义（安全参数）
 const (
@@ -25,7 +25,7 @@ const (
 	HMACSigLen     = 32   // HMAC-SHA256 签名长度
 	MinHMACKeyLen  = 16   // HMAC密钥最小长度
 	MaxTokenLen    = 8192 // 最大token长度限制（8KB）
-	HeaderPlainLen = 15   // 头部总长度：4Kid+4rand+1ver+3rsv+1flag+2len
+	HeaderPlainLen = 16   // 头部总长度：4Kid+4rand+1ver+3rsv+1flag+2len
 )
 
 // 预定义错误
@@ -218,8 +218,13 @@ func (c *RegisteredClaims) Valid() error {
 // SigningMethod 定义签名方法接口
 type SigningMethod interface {
 	Alg() string
+	Kid() uint32
 	Sign(payload []byte) ([]byte, error)
 	Verify(signedData []byte) ([]byte, error)
+}
+
+func (s *SigningMethodBinary) Kid() uint32 {
+	return s.kid
 }
 
 // SigningMethodBinary 二进制签名实现
@@ -240,7 +245,7 @@ func NewSigningMethodBinary(aesKey, hmacKey []byte) (*SigningMethodBinary, error
 	return &SigningMethodBinary{
 		aesKey:  aesKey,
 		hmacKey: hmacKey,
-		kid:     uint32(time.Now().Unix()),
+		kid:     GenKid(),
 	}, nil
 }
 
@@ -268,10 +273,15 @@ func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 		return nil, errors.New("kid not configured")
 	}
 	if len(s.aesKey) != AESKeyLen {
-		return nil, errors.New("aesKey must be 32 bytes for AES‑256")
+		return nil, errors.New("aesKey must be 32 bytes for AES-256")
 	}
 	if len(s.hmacKey) < MinHMACKeyLen {
 		return nil, errors.New("hmacKey too short, min 16 bytes")
+	}
+
+	// 原始Token长度必须能用2字节表示
+	if len(payload) > 0xFFFF {
+		return nil, ErrTokenTooLarge
 	}
 
 	block, err := aes.NewCipher(s.aesKey)
@@ -288,51 +298,53 @@ func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, prefixRand); err != nil {
 		return nil, fmt.Errorf("rand prefix failed: %w", err)
 	}
+
 	// GCM nonce 12字节
 	nonce := make([]byte, GCMNonceLen)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("rand nonce failed: %w", err)
 	}
 
-	// ==========组装15字节明文头部==========
 	plainHeader := make([]byte, HeaderPlainLen)
-	// 0‑3: kid uint32大端
+
+	// 0-3: kid uint32大端
 	binary.BigEndian.PutUint32(plainHeader[0:4], s.kid)
-	// 4‑7:4字节随机数
+
+	// 4-7: 4字节随机数
 	copy(plainHeader[4:8], prefixRand)
-	// 8:版本 0x01
+
+	// 8: 版本 0x01
 	plainHeader[8] = 0x01
-	//9‑11:保留位 0
-	copy(plainHeader[9:12], []byte{0, 0, 0})
-	//12:flags
-	var flags byte = 0x01
-	plainHeader[12] = flags
-	// 13‑14 fullCipherLen 暂时留0，加密完成回填
 
-	// AAD取前13字节！排除后面2字节密文长度（加密前不知道长度）
-	aad := plainHeader[:13]
+	// [9:13] 保留位，保持零值
 
-	// AES‑GCM加密 payload，fullCipherText = cipher+tag
+	// 13: flags
+	plainHeader[13] = 0x01
+
+	// 14-15: 原始Token长度（payload长度），加密前写入
+	binary.BigEndian.PutUint16(plainHeader[14:16], uint16(len(payload)))
+
+	// AAD取完整16字节明文头部（包含原始Token长度）
+	aad := plainHeader[:16]
+
+	// AES-GCM加密 payload，fullCipherText = cipher+tag
 	fullCipherText := gcm.Seal(nil, nonce, payload, aad)
 
-	// 加密完成后回填密文长度到头部
-	binary.BigEndian.PutUint16(plainHeader[13:15], uint16(len(fullCipherText)))
+	// signedBody = plainHeader(16) + fullCipherText + nonce(12)
+	signedBody := make([]byte, 0, HeaderPlainLen+len(fullCipherText)+GCMNonceLen)
+	signedBody = append(signedBody, plainHeader...)
+	signedBody = append(signedBody, fullCipherText...)
+	signedBody = append(signedBody, nonce...)
 
-	// innerPayload = plainHeader(15) + fullCipherText + nonce(12)
-	innerPayloadBuf := make([]byte, 0, HeaderPlainLen+len(fullCipherText)+GCMNonceLen)
-	innerPayloadBuf = append(innerPayloadBuf, plainHeader...)
-	innerPayloadBuf = append(innerPayloadBuf, fullCipherText...)
-	innerPayloadBuf = append(innerPayloadBuf, nonce...)
-
-	// HMAC‑SHA256 对innerPayloadBuf签名
+	// HMAC-SHA256 对signedBody签名
 	mac := hmac.New(sha256.New, s.hmacKey)
-	if _, err = mac.Write(innerPayloadBuf); err != nil {
+	if _, err = mac.Write(signedBody); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHMACCalculation, err)
 	}
 	signature := mac.Sum(nil)
 
-	// 最终二进制 = innerPayload + HMAC签名
-	finalToken := append(append([]byte(nil), innerPayloadBuf...), signature...)
+	// 最终二进制 = signedBody + HMAC签名
+	finalToken := append(append([]byte(nil), signedBody...), signature...)
 	return finalToken, nil
 }
 
@@ -341,9 +353,9 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	const minFullCipher = 16 // GCM最小密文长度(仅tag)
 
 	if len(signedData) > MaxTokenLen {
-		return nil, ErrTokenTooShort
+		return nil, ErrTokenTooLarge
 	}
-	//最小长度：15头部 + 最小密文16 + nonce12 + hmac32
+	// 最小长度：16头部 + 最小密文16 + nonce12 + hmac32
 	minTotal := HeaderPlainLen + minFullCipher + GCMNonceLen + HMACSigLen
 	if len(signedData) < minTotal {
 		return nil, ErrTokenTooShort
@@ -352,7 +364,7 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	innerPayload := signedData[:len(signedData)-HMACSigLen]
 	receivedSig := signedData[len(signedData)-HMACSigLen:]
 
-	//第一步 HMAC签名校验
+	// 第一步 HMAC签名校验
 	mac := hmac.New(sha256.New, s.hmacKey)
 	if _, err := mac.Write(innerPayload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHMACCalculation, err)
@@ -366,25 +378,28 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	plainHeader := innerPayload[offset : offset+HeaderPlainLen]
 	offset += HeaderPlainLen
 
-	//解析明文头部
+	// 解析明文头部
 	kid := binary.BigEndian.Uint32(plainHeader[0:4])
 	ver := plainHeader[8]
-	reserved := plainHeader[9:12]
-	flags := plainHeader[12]
-	fullCipherLen := int(binary.BigEndian.Uint16(plainHeader[13:15]))
+	reserved := plainHeader[9:13] // 4字节保留位
+	flags := plainHeader[13]
+	rawTokenLen := int(binary.BigEndian.Uint16(plainHeader[14:16])) // 原始Token长度
 
-	//协议版本、保留位、标志校验
+	// 协议版本、保留位、标志校验
 	if ver != 0x01 {
 		return nil, ErrTokenDecryptionFailed
 	}
-	if !bytes.Equal(reserved, []byte{0, 0, 0}) {
+	if !bytes.Equal(reserved, []byte{0, 0, 0, 0}) {
 		return nil, ErrTokenDecryptionFailed
 	}
 	if flags != 0x01 {
 		return nil, ErrTokenDecryptionFailed
 	}
 
-	//fullCipherLen安全边界校验
+	// 由原始Token长度推导密文长度：密文+tag = 原始长度 + 16
+	fullCipherLen := rawTokenLen + minFullCipher
+
+	// fullCipherLen安全边界校验
 	maxAllowedCipher := MaxTokenLen - (HeaderPlainLen + GCMNonceLen + HMACSigLen)
 	if fullCipherLen < minFullCipher || fullCipherLen > maxAllowedCipher {
 		return nil, ErrTokenDecryptionFailed
@@ -400,13 +415,13 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	offset += fullCipherLen
 	nonce := innerPayload[offset : offset+GCMNonceLen]
 
-	//校验kid与当前method实例匹配
+	// 校验kid与当前method实例匹配
 	if kid != s.kid {
 		return nil, ErrTokenSignatureInvalid
 	}
 
-	//AAD取完整13字节明文头部（已经包含4字节随机数）
-	aad := plainHeader[:13]
+	// AAD取完整16字节明文头部（与Sign一致）
+	aad := plainHeader[:16]
 
 	block, err := aes.NewCipher(s.aesKey)
 	if err != nil {
@@ -430,6 +445,7 @@ type Token struct {
 	Raw       string        // 原始令牌字符串
 	Claims    Claims        // 声明对象
 	Method    SigningMethod // 签名方法
+	Kid       uint32        // 密钥ID
 	Signature []byte        // 签名部分
 }
 
@@ -438,6 +454,7 @@ func NewToken(claims Claims, method SigningMethod) *Token {
 	return &Token{
 		Claims: claims,
 		Method: method,
+		Kid:    method.Kid(),
 	}
 }
 
@@ -563,6 +580,7 @@ func Parse(tokenStr string, claims Claims, method SigningMethod) (*Token, error)
 		Raw:    tokenStr,
 		Claims: claims,
 		Method: method,
+		Kid:    binary.BigEndian.Uint32(tokenBytes[0:4]),
 	}
 
 	return token, nil
@@ -583,10 +601,13 @@ func ParseWithClaims(tokenStr string, claims Claims, keyFunc func(*Token) (Signi
 	if len(tokenBytes) < HMACSigLen+GCMNonceLen {
 		return nil, ErrTokenTooShort
 	}
+	kid := binary.BigEndian.Uint32(tokenBytes[0:4])
 
 	// 创建临时令牌
 	token := &Token{
-		Raw: tokenStr,
+		Raw:    tokenStr,
+		Claims: claims,
+		Kid:    kid,
 	}
 
 	// 获取签名方法
@@ -594,6 +615,7 @@ func ParseWithClaims(tokenStr string, claims Claims, keyFunc func(*Token) (Signi
 	if err != nil {
 		return nil, err
 	}
+	token.Method = method
 
 	// 现在验证签名
 	decryptedBytes, err := method.Verify(tokenBytes)
