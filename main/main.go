@@ -5,46 +5,46 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hiuias/bnt"
+	"github.com/uias-io/bnt"
 )
 
-// BizClaims 自定义声明，嵌入标准RegisteredClaims，增加自己业务字段
+// BizClaims is a custom claims struct that embeds the standard RegisteredClaims and adds business-specific fields.
 type BizClaims struct {
 	bnt.RegisteredClaims
 
-	// 额外业务信息
-	Role    string `json:"role"`     // 用户角色
-	OrgID   string `json:"org_id"`   // 所属组织ID
-	IsAdmin bool   `json:"is_admin"` // 是否管理员
+	// Extra business information.
+	Role    string `json:"role"`     // User role
+	OrgID   string `json:"org_id"`   // Owning organization ID
+	IsAdmin bool   `json:"is_admin"` // Whether the user is an admin
 }
 
-// Valid 实现 bnt.Claims 接口
+// Valid implements the bnt.Claims interface.
 func (c *BizClaims) Valid() error {
-	// 执行原有标准校验（过期、签发者、续签次数等）
+	// Run the original standard validation (expiration, issuer, refresh count, etc.).
 	if err := c.RegisteredClaims.Valid(); err != nil {
 		return err
 	}
-	// 自定义业务校验规则
+	// Custom business validation rules.
 	if c.OrgID == "" {
-		return errors.New("org_id 不能为空")
+		return errors.New("org_id cannot be empty")
 	}
 	return nil
 }
 
 func main() {
-	// ========== 密钥准备 ==========
-	// AES-256 固定32字节；HMAC密钥≥16字节，生产环境必须密码学随机生成！
-	aesKey := []byte("01234567890123456789012345678901") // 32字节
+	// ========== Key preparation ==========
+	// AES-256 uses a fixed 32 bytes; HMAC key must be >= 16 bytes, and in production it must be generated with a cryptographically secure random source!
+	aesKey := []byte("01234567890123456789012345678901") // 32 bytes
 	hmacKey := []byte("abcdefgh12345678abcdefgh12345678")
 
-	// 创建签名实例
+	// Create a signing instance.
 	// kid := uint32(time.Now().Unix())
 	signMethod, err := bnt.NewSigningMethodBinaryWithKID(aesKey, hmacKey, bnt.GenKid())
 	if err != nil {
 		panic(err)
 	}
 
-	// 构造【自定义Claims】，带上额外业务字段
+	// Build [custom Claims] with extra business fields.
 	now := time.Now().UTC()
 	claims := &BizClaims{
 		RegisteredClaims: bnt.RegisteredClaims{
@@ -52,62 +52,62 @@ func main() {
 			IssuedAt:      &now,
 			NotBefore:     &now,
 			ExpiresAt:     func() *time.Time { t := now.Add(1 * time.Hour); return &t }(),
-			Ttl:           3600, // 有效时长秒
-			MaxIssueCount: 0,    // 最多允许续签2次
+			Ttl:           3600, // Validity duration in seconds
+			MaxIssueCount: 0,    // Allow at most 2 refreshes
 		},
-		// 填充额外信息
+		// Fill in extra information.
 		Role:    "色角",
 		OrgID:   "org-0005",
 		IsAdmin: false,
 	}
 
-	// 创建内存token对象
+	// Create an in-memory token object.
 	tokenObj := bnt.NewToken(claims, signMethod)
 
 	fmt.Println("||||||||||||||")
 	fmt.Println("-->", tokenObj)
-	// 签名加密，得到对外下发token字符串
+	// Sign and encrypt to obtain the token string to be issued externally.
 	tokenStr, err := tokenObj.SignedString()
 	if err != nil {
-		panic(fmt.Sprintf("签发失败:%v", err))
+		panic(fmt.Sprintf("signing failed: %v", err))
 	}
 
-	fmt.Println("生成Token字符串：")
+	fmt.Println("Generated token string:")
 	fmt.Println(tokenStr)
 	fmt.Println()
 
-	// -------------------- 模拟服务端验证token --------------------
-	fmt.Println("===== 开始验证Token =====")
-	parseClaims := &BizClaims{} // 使用自定义结构体接收解析结果
+	// -------------------- Simulate server-side token verification --------------------
+	fmt.Println("===== Starting token verification =====")
+	parseClaims := &BizClaims{} // Use the custom struct to receive the parse result
 	parsedToken, err := bnt.Parse(tokenStr, parseClaims, signMethod)
 	if err != nil {
-		panic(fmt.Sprintf("验证失败：%v", err))
+		panic(fmt.Sprintf("verification failed: %v", err))
 	}
 	fmt.Println()
-	fmt.Println("验证成功！")
+	fmt.Println("Verification succeeded!")
 	fmt.Println(parsedToken.Claims)
 
-	// -------------------- Token续签演示 --------------------
-	fmt.Println("===== 执行Token续签 =====")
+	// -------------------- Token refresh demo --------------------
+	fmt.Println("===== Performing token refresh =====")
 
 	time.Sleep(5 * time.Second)
 	err = parsedToken.Refresh("zzzzzzzzzzzzzzzzzzzzzzz")
 	if err != nil {
-		panic(fmt.Sprintf("续签失败：%v", err))
+		panic(fmt.Sprintf("refresh failed: %v", err))
 	}
 
 	fmt.Println()
 	fmt.Println("||||||||||||||")
 	fmt.Println(parsedToken.Claims)
-	// Refresh只修改内存，需要重新SignedString拿到新token
+	// Refresh only modifies memory; you need to call SignedString again to get the new token.
 	newTokenStr, err := parsedToken.SignedString()
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("续签后新Token：")
+	fmt.Println("New token after refresh:")
 	fmt.Println(newTokenStr)
-	// 解析续签后的token，自定义字段依然保留
-	fmt.Println("\n===== 校验续签后的Token =====")
+	// Parse the refreshed token; custom fields are still preserved.
+	fmt.Println("\n===== Verifying the refreshed token =====")
 	renewClaims := &BizClaims{}
 	aa, err := bnt.Parse(newTokenStr, renewClaims, signMethod)
 	if err != nil {
@@ -115,7 +115,7 @@ func main() {
 	}
 
 	fmt.Println()
-	fmt.Printf("续签后 角色:%s  组织:%s  续签次数:%d\n", renewClaims.Role, renewClaims.OrgID, renewClaims.IssueCount)
+	fmt.Printf("After refresh  Role:%s  Org:%s  Refresh count:%d\n", renewClaims.Role, renewClaims.OrgID, renewClaims.IssueCount)
 	fmt.Println(aa.Claims)
 
 	fmt.Println()

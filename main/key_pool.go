@@ -6,10 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hiuias/bnt"
+	"github.com/uias-io/bnt"
 )
-
-// ========== 业务层密钥管理 ==========
 
 type KeyPool struct {
 	keys map[uint32]*KeyPair
@@ -24,25 +22,25 @@ type KeyPair struct {
 	Created time.Time
 }
 
-// 业务层实现密钥轮换
+// RotateKeys Business layer implements key rotation.
 func (kp *KeyPool) RotateKeys() error {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 
-	// 1. 生成新密钥
+	// 1. Generate new keys.
 	newKid := uint32(time.Now().Unix())
 	aesKey := make([]byte, 32)
 	hmacKey := make([]byte, 32)
-	rand.Read(aesKey)
-	rand.Read(hmacKey)
+	_, _ = rand.Read(aesKey)
+	_, _ = rand.Read(hmacKey)
 
-	// 2. 创建新的SigningMethod
+	// 2. Create a new SigningMethod.
 	method, err := bnt.NewSigningMethodBinaryWithKID(aesKey, hmacKey, newKid)
 	if err != nil {
 		return err
 	}
 
-	// 3. 添加到密钥池
+	// 3. Add to the key pool.
 	kp.keys[newKid] = &KeyPair{
 		AESKey:  aesKey,
 		HMACKey: hmacKey,
@@ -51,7 +49,7 @@ func (kp *KeyPool) RotateKeys() error {
 		Created: time.Now(),
 	}
 
-	// 4. 可选：旧密钥标记为非活跃，但保留用于验证旧token
+	// 4. Optional: mark old keys as inactive, but keep them for verifying old tokens.
 	for kid, pair := range kp.keys {
 		if kid != newKid {
 			pair.Active = false
@@ -61,7 +59,7 @@ func (kp *KeyPool) RotateKeys() error {
 	return nil
 }
 
-// 业务层验证函数
+// KeyFunc Business-layer verification function.
 func (kp *KeyPool) KeyFunc(token *bnt.Token) (bnt.SigningMethod, error) {
 	kp.mu.RLock()
 	defer kp.mu.RUnlock()
@@ -73,7 +71,7 @@ func (kp *KeyPool) KeyFunc(token *bnt.Token) (bnt.SigningMethod, error) {
 	return pair.Method, nil
 }
 
-// 业务层签发新token（使用活跃密钥）
+// IssueToken Business layer issues a new token (using the active key).
 func (kp *KeyPool) IssueToken(claims bnt.Claims) (string, error) {
 	kp.mu.RLock()
 	var activeMethod bnt.SigningMethod
@@ -93,7 +91,7 @@ func (kp *KeyPool) IssueToken(claims bnt.Claims) (string, error) {
 	return token.SignedString()
 }
 
-// 业务层验证token（自动选择对应密钥）
+// VerifyToken Business layer verifies a token (automatically selecting the corresponding key).
 func (kp *KeyPool) VerifyToken(tokenStr string, claims bnt.Claims) (*bnt.Token, error) {
 	return bnt.ParseWithClaims(tokenStr, claims, kp.KeyFunc)
 }

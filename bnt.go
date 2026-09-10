@@ -16,19 +16,18 @@ import (
 	"time"
 )
 
-// [4字节Kid][4字节随机数][1字节版本][4字节保留][1字节标志][2字节原始Token长度][原始Token][12B nonce]
-
-// 常量定义（安全参数）
+// [4Bytes Kid][4Bytes Random][1Byte Version][4Bytes Reserved][1Byte Flags][2Bytes RawTokenLength][RawToken][12B nonce]
+// Constant definitions (security parameters)
 const (
-	AESKeyLen      = 32   // AES-256 密钥长度（必须32字节）
-	GCMNonceLen    = 12   // GCM推荐Nonce长度
-	HMACSigLen     = 32   // HMAC-SHA256 签名长度
-	MinHMACKeyLen  = 16   // HMAC密钥最小长度
-	MaxTokenLen    = 8192 // 最大token长度限制（8KB）
-	HeaderPlainLen = 16   // 头部总长度：4Kid+4rand+1ver+3rsv+1flag+2len
+	AESKeyLen      = 32   // AES‑256 key length (must be 32 bytes)
+	GCMNonceLen    = 12   // Recommended GCM Nonce length
+	HMACSigLen     = 32   // HMAC‑SHA256 signature length
+	MinHMACKeyLen  = 16   // Minimum HMAC key length
+	MaxTokenLen    = 8192 // Maximum token length limit (8KB)
+	HeaderPlainLen = 16   // Total plain header length: 4Kid+4rand+1ver+3rsv+1flag+2len
 )
 
-// 预定义错误
+// Predefined errors
 var (
 	ErrInvalidKey                = errors.New("key is invalid")
 	ErrInvalidKeyType            = errors.New("key is of invalid type")
@@ -66,10 +65,11 @@ var (
 	ErrNonceGeneration           = errors.New("failed to generate nonce")
 	ErrHMACCalculation           = errors.New("failed to calculate HMAC")
 	ErrClaimsMarshaling          = errors.New("failed to marshal claims")
-	ErrClaimsUnmarshaling        = errors.New("failed to unmarshal claims")
+	ErrClaimsUnmarshalling       = errors.New("failed to unmarshal claims")
+	ErrTokenKidMismatch          = errors.New("token kid mismatch")
 )
 
-// VerificationError 提供更详细的错误上下文
+// VerificationError provides detailed error context
 type VerificationError struct {
 	Err  error
 	Step string
@@ -87,7 +87,7 @@ func (e *VerificationError) Unwrap() error {
 	return e.Err
 }
 
-// Base64查找表
+// Base64 lookup table
 var base64Table [256]uint8
 
 const (
@@ -95,9 +95,9 @@ const (
 	base64Valid   = 1
 )
 
-// 初始化Base64查找表
+// init initializes Base64 lookup table
 func init() {
-	// 标准Base64字符集: A-Z a-z 0-9 + /
+	// Standard Base64 charset: A‑Z a‑z 0‑9 + /
 	for c := 'A'; c <= 'Z'; c++ {
 		base64Table[c] = base64Valid
 	}
@@ -109,19 +109,19 @@ func init() {
 	}
 	base64Table['+'] = base64Valid
 	base64Table['/'] = base64Valid
-	base64Table['='] = base64Valid // 允许填充字符
+	base64Table['='] = base64Valid // Allow padding character
 }
 
-// IsValidBase64 验证Base64字符串格式（高性能查表法）
+// IsValidBase64 validates Base64 string format with high‑performance lookup table
 func IsValidBase64(s string) bool {
 	n := len(s)
 
-	// 长度检查：不能为空，必须是4的倍数，不能超过最大限制
+	// Length check: cannot be empty, must be multiple of 4, cannot exceed max limit
 	if n == 0 || n%4 != 0 || n > MaxTokenLen {
 		return false
 	}
 
-	// 检查填充字符
+	// Check padding characters
 	eqCount := 0
 	if n > 0 && s[n-1] == '=' {
 		eqCount = 1
@@ -129,16 +129,12 @@ func IsValidBase64(s string) bool {
 			eqCount = 2
 		}
 	}
-	// Base64填充最多2个'='
-	if eqCount > 2 {
-		return false
-	}
 
-	// 验证非填充部分的字符
+	// Validate characters excluding padding
 	limit := n - eqCount
 	for i := 0; i < limit; i++ {
 		c := s[i]
-		// 快速检查ASCII范围（性能优化）
+		// Fast ASCII range check for performance optimization
 		if c > 127 {
 			return false
 		}
@@ -150,37 +146,37 @@ func IsValidBase64(s string) bool {
 	return true
 }
 
-// Claims 定义claims接口，所有自定义claims需实现此接口
+// Claims defines claims interface, all custom claims must implement this interface
 type Claims interface {
 	Valid() error
 }
 
-// RegisteredClaims 包含标准的声明字段
+// RegisteredClaims contains standard claim fields
 type RegisteredClaims struct {
-	ExpiresAt     *time.Time `json:"exp,omitempty"` // 过期时间
-	NotBefore     *time.Time `json:"nbf,omitempty"` // 生效时间
-	IssuedAt      *time.Time `json:"iat,omitempty"` // 签发时间
-	ID            string     `json:"jti,omitempty"` // Token ID
-	Ttl           uint32     `json:"ttl,omitempty"` // 有效时长（秒）
-	IssueCount    uint32     `json:"isc,omitempty"` // 续签累计次数
-	MaxIssueCount uint32     `json:"mic,omitempty"` // 最大允许续签次数
+	ExpiresAt     *time.Time `json:"exp,omitempty"` // Expiration time
+	NotBefore     *time.Time `json:"nbf,omitempty"` // Not‑before valid time
+	IssuedAt      *time.Time `json:"iat,omitempty"` // Issued‑at timestamp
+	ID            string     `json:"jti,omitempty"` // Token unique ID
+	Ttl           uint32     `json:"ttl,omitempty"` // Valid duration in seconds
+	IssueCount    uint32     `json:"isc,omitempty"` // Cumulative refresh count
+	MaxIssueCount uint32     `json:"mic,omitempty"` // Maximum allowed refresh times
 }
 
-// Valid 验证标准声明
+// Valid validates standard registered claims
 func (c *RegisteredClaims) Valid() error {
 	now := time.Now().UTC()
 
-	// 验证ID
+	// Validate token ID
 	if c.ID == "" {
 		return ErrTokenInvalidId
 	}
 
-	// 验证续签次数
+	// Validate refresh count
 	if c.IssueCount > c.MaxIssueCount {
 		return ErrTokenTooManyRenewals
 	}
 
-	// 验证过期时间
+	// Validate expiration time
 	if c.ExpiresAt != nil && !c.ExpiresAt.IsZero() {
 		expTime := *c.ExpiresAt
 		if expTime.Before(now) {
@@ -188,7 +184,7 @@ func (c *RegisteredClaims) Valid() error {
 		}
 	}
 
-	// 验证生效时间
+	// Validate not‑before time
 	if c.NotBefore != nil && !c.NotBefore.IsZero() {
 		nbfTime := *c.NotBefore
 		if nbfTime.After(now) {
@@ -196,7 +192,7 @@ func (c *RegisteredClaims) Valid() error {
 		}
 	}
 
-	// 验证签发时间
+	// Validate issued‑at time
 	if c.IssuedAt != nil && !c.IssuedAt.IsZero() {
 		iatTime := *c.IssuedAt
 		if iatTime.After(now) {
@@ -204,7 +200,7 @@ func (c *RegisteredClaims) Valid() error {
 		}
 	}
 
-	// 验证TTL（基于签发时间）
+	// Validate TTL based on issued‑at time
 	if c.IssuedAt != nil && c.Ttl > 0 {
 		expTime := c.IssuedAt.Add(time.Duration(c.Ttl) * time.Second)
 		if now.After(expTime) {
@@ -215,7 +211,7 @@ func (c *RegisteredClaims) Valid() error {
 	return nil
 }
 
-// SigningMethod 定义签名方法接口
+// SigningMethod defines signing algorithm interface
 type SigningMethod interface {
 	Alg() string
 	Kid() uint32
@@ -227,17 +223,17 @@ func (s *SigningMethodBinary) Kid() uint32 {
 	return s.kid
 }
 
-// SigningMethodBinary 二进制签名实现
+// SigningMethodBinary binary signing implementation
 type SigningMethodBinary struct {
 	aesKey  []byte
 	hmacKey []byte
-	kid     uint32 // Key ID，用于密钥轮换
+	kid     uint32 // Key ID for key rotation support
 }
 
-// NewSigningMethodBinary 创建新的二进制签名方法
+// NewSigningMethodBinary creates new binary signing method instance
 func NewSigningMethodBinary(aesKey, hmacKey []byte) (*SigningMethodBinary, error) {
 	if len(aesKey) != AESKeyLen {
-		return nil, fmt.Errorf("%w: must be %d bytes (AES-256), got %d", ErrAESKeyLength, AESKeyLen, len(aesKey))
+		return nil, fmt.Errorf("%w: must be %d bytes (AES‑256), got %d", ErrAESKeyLength, AESKeyLen, len(aesKey))
 	}
 	if len(hmacKey) < MinHMACKeyLen {
 		return nil, fmt.Errorf("%w: too short (min %d bytes), got %d", ErrHMACKeyLength, MinHMACKeyLen, len(hmacKey))
@@ -249,7 +245,7 @@ func NewSigningMethodBinary(aesKey, hmacKey []byte) (*SigningMethodBinary, error
 	}, nil
 }
 
-// NewSigningMethodBinaryWithKID 创建带Key ID的二进制签名方法
+// NewSigningMethodBinaryWithKID creates binary signing method with specified Key ID
 func NewSigningMethodBinaryWithKID(aesKey, hmacKey []byte, kid uint32) (*SigningMethodBinary, error) {
 	method, err := NewSigningMethodBinary(aesKey, hmacKey)
 	if err != nil {
@@ -259,27 +255,27 @@ func NewSigningMethodBinaryWithKID(aesKey, hmacKey []byte, kid uint32) (*Signing
 	return method, nil
 }
 
-// Alg 返回算法名称
+// Alg returns algorithm identifier string
 func (s *SigningMethodBinary) Alg() string {
 	if s.kid != 0 {
-		return fmt.Sprintf("BINARY-HS256-KID-%d", s.kid)
+		return fmt.Sprintf("BINARY‑HS256‑KID‑%d", s.kid)
 	}
-	return "BINARY-HS256"
+	return "BINARY‑HS256"
 }
 
-// Sign 对payload进行签名，返回二进制token
+// Sign signs payload and returns raw binary token
 func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 	if s.kid == 0 {
 		return nil, errors.New("kid not configured")
 	}
 	if len(s.aesKey) != AESKeyLen {
-		return nil, errors.New("aesKey must be 32 bytes for AES-256")
+		return nil, errors.New("aesKey must be 32 bytes for AES‑256")
 	}
 	if len(s.hmacKey) < MinHMACKeyLen {
 		return nil, errors.New("hmacKey too short, min 16 bytes")
 	}
 
-	// 原始Token长度必须能用2字节表示
+	// Raw token length must fit inside 2‑byte unsigned integer
 	if len(payload) > 0xFFFF {
 		return nil, ErrTokenTooLarge
 	}
@@ -293,13 +289,13 @@ func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %w", ErrGCMCreation, err)
 	}
 
-	// 4字节随机数
+	// 4‑byte random prefix
 	prefixRand := make([]byte, 4)
 	if _, err := io.ReadFull(rand.Reader, prefixRand); err != nil {
 		return nil, fmt.Errorf("rand prefix failed: %w", err)
 	}
 
-	// GCM nonce 12字节
+	// GCM nonce with 12 bytes
 	nonce := make([]byte, GCMNonceLen)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("rand nonce failed: %w", err)
@@ -307,27 +303,27 @@ func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 
 	plainHeader := make([]byte, HeaderPlainLen)
 
-	// 0-3: kid uint32大端
+	// 0‑3: kid stored as big‑endian uint32
 	binary.BigEndian.PutUint32(plainHeader[0:4], s.kid)
 
-	// 4-7: 4字节随机数
+	// 4‑7: 4‑byte random prefix
 	copy(plainHeader[4:8], prefixRand)
 
-	// 8: 版本 0x01
+	// 8: protocol version 0x01
 	plainHeader[8] = 0x01
 
-	// [9:13] 保留位，保持零值
+	// [9:13] reserved bytes, keep zero value
 
-	// 13: flags
+	// 13: flags byte
 	plainHeader[13] = 0x01
 
-	// 14-15: 原始Token长度（payload长度），加密前写入
+	// 14‑15: raw payload length before encryption
 	binary.BigEndian.PutUint16(plainHeader[14:16], uint16(len(payload)))
 
-	// AAD取完整16字节明文头部（包含原始Token长度）
+	// AAD uses full 16‑byte plain header including raw payload length
 	aad := plainHeader[:16]
 
-	// AES-GCM加密 payload，fullCipherText = cipher+tag
+	// AES‑GCM encrypt payload, fullCipherText = ciphertext + authentication tag
 	fullCipherText := gcm.Seal(nil, nonce, payload, aad)
 
 	// signedBody = plainHeader(16) + fullCipherText + nonce(12)
@@ -336,26 +332,26 @@ func (s *SigningMethodBinary) Sign(payload []byte) ([]byte, error) {
 	signedBody = append(signedBody, fullCipherText...)
 	signedBody = append(signedBody, nonce...)
 
-	// HMAC-SHA256 对signedBody签名
+	// Compute HMAC‑SHA256 signature over signedBody
 	mac := hmac.New(sha256.New, s.hmacKey)
 	if _, err = mac.Write(signedBody); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHMACCalculation, err)
 	}
 	signature := mac.Sum(nil)
 
-	// 最终二进制 = signedBody + HMAC签名
+	// Final binary token = signedBody concatenated with HMAC signature
 	finalToken := append(append([]byte(nil), signedBody...), signature...)
 	return finalToken, nil
 }
 
-// Verify 验证签名并返回解密后的payload
+// Verify validates signature and returns decrypted original payload
 func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
-	const minFullCipher = 16 // GCM最小密文长度(仅tag)
+	const minFullCipher = 16 // Minimum GCM ciphertext length (tag only)
 
 	if len(signedData) > MaxTokenLen {
 		return nil, ErrTokenTooLarge
 	}
-	// 最小长度：16头部 + 最小密文16 + nonce12 + hmac32
+	// Minimum total length: 16 header + min cipher 16 + nonce12 + hmac32
 	minTotal := HeaderPlainLen + minFullCipher + GCMNonceLen + HMACSigLen
 	if len(signedData) < minTotal {
 		return nil, ErrTokenTooShort
@@ -364,7 +360,7 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	innerPayload := signedData[:len(signedData)-HMACSigLen]
 	receivedSig := signedData[len(signedData)-HMACSigLen:]
 
-	// 第一步 HMAC签名校验
+	// Step1: verify HMAC signature
 	mac := hmac.New(sha256.New, s.hmacKey)
 	if _, err := mac.Write(innerPayload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHMACCalculation, err)
@@ -378,14 +374,14 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	plainHeader := innerPayload[offset : offset+HeaderPlainLen]
 	offset += HeaderPlainLen
 
-	// 解析明文头部
+	// Parse plain header fields
 	kid := binary.BigEndian.Uint32(plainHeader[0:4])
 	ver := plainHeader[8]
-	reserved := plainHeader[9:13] // 4字节保留位
+	reserved := plainHeader[9:13] // 4‑byte reserved field
 	flags := plainHeader[13]
-	rawTokenLen := int(binary.BigEndian.Uint16(plainHeader[14:16])) // 原始Token长度
+	rawTokenLen := int(binary.BigEndian.Uint16(plainHeader[14:16])) // original payload length
 
-	// 协议版本、保留位、标志校验
+	// Validate protocol version, reserved bytes and flags
 	if ver != 0x01 {
 		return nil, ErrTokenDecryptionFailed
 	}
@@ -396,10 +392,10 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 		return nil, ErrTokenDecryptionFailed
 	}
 
-	// 由原始Token长度推导密文长度：密文+tag = 原始长度 + 16
+	// Derive cipher length: ciphertext+tag = raw payload length + 16‑byte GCM tag
 	fullCipherLen := rawTokenLen + minFullCipher
 
-	// fullCipherLen安全边界校验
+	// Safe boundary check for cipher length
 	maxAllowedCipher := MaxTokenLen - (HeaderPlainLen + GCMNonceLen + HMACSigLen)
 	if fullCipherLen < minFullCipher || fullCipherLen > maxAllowedCipher {
 		return nil, ErrTokenDecryptionFailed
@@ -415,12 +411,12 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	offset += fullCipherLen
 	nonce := innerPayload[offset : offset+GCMNonceLen]
 
-	// 校验kid与当前method实例匹配
+	// Check whether kid matches current signing method instance
 	if kid != s.kid {
-		return nil, ErrTokenSignatureInvalid
+		return nil, ErrTokenKidMismatch
 	}
 
-	// AAD取完整16字节明文头部（与Sign一致）
+	// AAD must be exactly same 16‑byte plain header used during signing
 	aad := plainHeader[:16]
 
 	block, err := aes.NewCipher(s.aesKey)
@@ -440,16 +436,16 @@ func (s *SigningMethodBinary) Verify(signedData []byte) ([]byte, error) {
 	return plain, nil
 }
 
-// Token 表示一个令牌对象
+// Token represents a parsed token object
 type Token struct {
-	Raw       string        // 原始令牌字符串
-	Claims    Claims        // 声明对象
-	Method    SigningMethod // 签名方法
-	Kid       uint32        // 密钥ID
-	Signature []byte        // 签名部分
+	Raw       string        // Original base64‑encoded token string
+	Claims    Claims        // Parsed claim instance
+	Method    SigningMethod // Attached signing algorithm
+	Kid       uint32        // Key ID extracted from token
+	Signature []byte        // Raw signature bytes
 }
 
-// NewToken 创建一个新的Token
+// NewToken creates a new Token instance with given claims and signing method
 func NewToken(claims Claims, method SigningMethod) *Token {
 	return &Token{
 		Claims: claims,
@@ -458,24 +454,24 @@ func NewToken(claims Claims, method SigningMethod) *Token {
 	}
 }
 
-// SignedString 生成签名后的token字符串，确保使用标准Base64编码
+// SignedString generates complete signed token encoded as standard Base64 string
 func (t *Token) SignedString() (string, error) {
-	// 将claims序列化为JSON
+	// Marshal claims structure into JSON bytes
 	claimsBytes, err := json.Marshal(t.Claims)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrClaimsMarshaling, err)
 	}
 
-	// 签名
+	// Execute signing process
 	signedBytes, err := t.Method.Sign(claimsBytes)
 	if err != nil {
 		return "", fmt.Errorf("signing failed: %w", err)
 	}
 
-	// 使用标准Base64编码
+	// Encode binary token with standard Base64
 	encoded := base64.StdEncoding.EncodeToString(signedBytes)
 
-	// 验证生成的Base64字符串是否符合标准（使用高性能查表法）
+	// Validate generated base64 string with high‑performance lookup table
 	if !IsValidBase64(encoded) {
 		return "", ErrInvalidBase64
 	}
@@ -484,41 +480,41 @@ func (t *Token) SignedString() (string, error) {
 	return encoded, nil
 }
 
-// Refreshable 接口
+// Refreshable defines interface for refresh‑capable claims
 type Refreshable interface {
 	Refresh(tid string) error
 }
 
-// RegisteredClaims 实现 Refreshable
+// Refresh RegisteredClaims implements Refreshable interface
 func (c *RegisteredClaims) Refresh(tid string) error {
 
-	// 1. 检查是否允许续签
+	// 1. Check if refresh feature is enabled
 	if c.MaxIssueCount == 0 {
 		return ErrTokenRefreshNotAllowed
 	}
 
-	// 2. 检查续签次数是否已达上限
+	// 2. Check whether refresh count reaches upper limit
 	if c.IssueCount >= c.MaxIssueCount {
 		return ErrTokenTooManyRenewals
 	}
 
-	// 3. 检查是否已过期（不允许续签过期 token）
+	// 3. Forbid refresh for already expired token
 	now := time.Now().UTC()
 	if c.ExpiresAt != nil && !c.ExpiresAt.IsZero() && c.ExpiresAt.Before(now) {
 		return ErrTokenRefreshExpired
 	}
 
-	// 4. 检查是否尚未生效
+	// 4. Forbid refresh before token becomes valid
 	if c.NotBefore != nil && !c.NotBefore.IsZero() && c.NotBefore.After(now) {
 		return ErrTokenRefreshNotYetValid
 	}
 
-	// 5. 检查 IssueCount 是否会溢出
+	// 5. Prevent uint32 integer overflow on issue count increment
 	if c.IssueCount == ^uint32(0) {
 		return ErrTokenRefreshOverflow
 	}
 
-	// 6. 检查 TTL 是否有效
+	// 6. Validate TTL value for refresh operation
 	if c.Ttl == 0 {
 		return ErrTokenRefreshInvalidTTL
 	}
@@ -538,7 +534,7 @@ func (c *RegisteredClaims) Refresh(tid string) error {
 	return nil
 }
 
-// Token 的 Refresh 方法
+// Refresh performs token refresh on Token wrapper
 func (t *Token) Refresh(tid string) error {
 	if refreshable, ok := t.Claims.(Refreshable); ok {
 		return refreshable.Refresh(tid)
@@ -546,36 +542,36 @@ func (t *Token) Refresh(tid string) error {
 	return errors.New("claims does not implement Refreshable interface")
 }
 
-// Parse 解析并验证token字符串
+// Parse parses and validates token string with fixed signing method
 func Parse(tokenStr string, claims Claims, method SigningMethod) (*Token, error) {
-	// 验证输入的Base64格式（使用高性能查表法）
+	// Pre‑validate input Base64 format
 	if !IsValidBase64(tokenStr) {
 		return nil, ErrInvalidBase64
 	}
 
-	// Base64解码
+	// Base64 decode to raw binary token
 	tokenBytes, err := base64.StdEncoding.DecodeString(tokenStr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBase64Decoding, err)
 	}
 
-	// 验证签名并获取解密后的payload
+	// Verify signature and get decrypted payload
 	decryptedBytes, err := method.Verify(tokenBytes)
 	if err != nil {
 		return nil, fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// 反序列化到claims
+	// Unmarshal JSON payload into target claims struct
 	if err := json.Unmarshal(decryptedBytes, claims); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrClaimsUnmarshaling, err)
+		return nil, fmt.Errorf("%w: %w", ErrClaimsUnmarshalling, err)
 	}
 
-	// 验证claims
+	// Run claims business validation logic
 	if err := claims.Valid(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTokenInvalidClaims, err)
 	}
 
-	// 创建并返回token对象
+	// Construct final token object
 	token := &Token{
 		Raw:    tokenStr,
 		Claims: claims,
@@ -586,9 +582,9 @@ func Parse(tokenStr string, claims Claims, method SigningMethod) (*Token, error)
 	return token, nil
 }
 
-// ParseWithClaims 解析令牌并使用提供的函数验证声明
+// ParseWithClaims parses token and selects signing method dynamically via keyFunc callback for key‑rotation
 func ParseWithClaims(tokenStr string, claims Claims, keyFunc func(*Token) (SigningMethod, error)) (*Token, error) {
-	// 先解析令牌但不验证签名（使用高性能查表法）
+	// Pre‑validate input Base64 string format
 	if !IsValidBase64(tokenStr) {
 		return nil, ErrInvalidBase64
 	}
@@ -603,32 +599,32 @@ func ParseWithClaims(tokenStr string, claims Claims, keyFunc func(*Token) (Signi
 	}
 	kid := binary.BigEndian.Uint32(tokenBytes[0:4])
 
-	// 创建临时令牌
+	// Build temporary token container only carrying kid for keyFunc
 	token := &Token{
 		Raw:    tokenStr,
 		Claims: claims,
 		Kid:    kid,
 	}
 
-	// 获取签名方法
+	// Invoke callback to resolve corresponding signing method
 	method, err := keyFunc(token)
 	if err != nil {
 		return nil, err
 	}
 	token.Method = method
 
-	// 现在验证签名
+	// Now perform full signature cryptographic verification
 	decryptedBytes, err := method.Verify(tokenBytes)
 	if err != nil {
 		return nil, fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// 反序列化到claims
+	// Deserialize JSON payload into claims
 	if err := json.Unmarshal(decryptedBytes, claims); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrClaimsUnmarshaling, err)
+		return nil, fmt.Errorf("%w: %w", ErrClaimsUnmarshalling, err)
 	}
 
-	// 验证claims
+	// Run claims logical validation
 	if err := claims.Valid(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTokenInvalidClaims, err)
 	}
